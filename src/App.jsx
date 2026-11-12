@@ -185,6 +185,7 @@ const COMMAND_LIST = [
   ["cat <file>", "print a file from ls"],
   ["neofetch", "system info, portfolio edition"],
   ["clear", "clear the screen"],
+  ["<tab>", "autocomplete the command or its argument"],
 ];
 
 function buildHelp() {
@@ -356,6 +357,49 @@ const AUTOCOMPLETE = [
   "contact", "open", "resume", "github", "linkedin", "email", "social",
   "theme", "ls", "cat", "neofetch", "clear", "date", "echo",
 ];
+const ARG_COMPLETIONS = {
+  open: SECTION_IDS,
+  cd: SECTION_IDS,
+  cat: [...Object.keys(FILES), "experience/", "projects/", "resume.pdf"],
+  theme: THEME_IDS,
+};
+
+function commonPrefix(strings) {
+  if (!strings.length) return "";
+  let prefix = strings[0];
+  for (const s of strings.slice(1)) {
+    while (prefix && !s.toLowerCase().startsWith(prefix.toLowerCase())) {
+      prefix = prefix.slice(0, -1);
+    }
+  }
+  return prefix;
+}
+
+/* Resolve what Tab should try to complete for the current input: the command
+   name itself, or the single argument of a command that takes a known set
+   of values (open/cd section, cat file, theme name). */
+function getCompletionContext(value) {
+  const endsWithSpace = /\s$/.test(value);
+  const tokens = value.trim().split(/\s+/).filter(Boolean);
+
+  if (tokens.length === 0) {
+    return { kind: "command", cmd: null, prefix: "", options: AUTOCOMPLETE };
+  }
+  if (tokens.length === 1 && !endsWithSpace) {
+    return { kind: "command", cmd: null, prefix: tokens[0].toLowerCase(), options: AUTOCOMPLETE };
+  }
+
+  const cmd = tokens[0].toLowerCase();
+  const options = ARG_COMPLETIONS[cmd];
+  if (!options) return null;
+  if (tokens.length === 1 && endsWithSpace) {
+    return { kind: "arg", cmd, prefix: "", options };
+  }
+  if (tokens.length === 2 && !endsWithSpace) {
+    return { kind: "arg", cmd, prefix: tokens[1].toLowerCase(), options };
+  }
+  return null;
+}
 
 function Terminal({ theme, setTheme }) {
   const [history, setHistory] = useState([]);
@@ -364,6 +408,7 @@ function Terminal({ theme, setTheme }) {
   const [cmdIndex, setCmdIndex] = useState(null);
   const idRef = useRef(0);
   const outputRef = useRef(null);
+  const tabCycleRef = useRef(null);
 
   const push = (kind, content) => {
     idRef.current += 1;
@@ -391,6 +436,7 @@ function Terminal({ theme, setTheme }) {
   }, [history]);
 
   const run = (raw) => {
+    tabCycleRef.current = null;
     const trimmed = raw.trim();
     push("input", trimmed);
     if (trimmed) setCmdLog((log) => [...log, trimmed]);
@@ -414,6 +460,7 @@ function Terminal({ theme, setTheme }) {
 
   const onSubmit = (e) => {
     e.preventDefault();
+    tabCycleRef.current = null;
     run(input);
     setInput("");
   };
@@ -438,10 +485,33 @@ function Terminal({ theme, setTheme }) {
       }
     } else if (e.key === "Tab") {
       e.preventDefault();
-      const partial = input.trim().toLowerCase();
-      if (!partial) return;
-      const match = AUTOCOMPLETE.find((c) => c.startsWith(partial));
-      if (match) setInput(`${match} `);
+      const ctx = getCompletionContext(input);
+      if (!ctx) return;
+
+      const matches = ctx.options.filter((o) => o.toLowerCase().startsWith(ctx.prefix));
+      if (!matches.length) return;
+
+      const toValue = (word) => (ctx.kind === "command" ? word : `${ctx.cmd} ${word}`);
+      const cycleKey = `${ctx.kind}:${ctx.cmd || ""}:${ctx.prefix}`;
+
+      if (matches.length === 1) {
+        tabCycleRef.current = null;
+        setInput(`${toValue(matches[0])} `);
+        return;
+      }
+
+      if (tabCycleRef.current?.key === cycleKey) {
+        const next = (tabCycleRef.current.index + 1) % matches.length;
+        tabCycleRef.current = { key: cycleKey, index: next };
+        setInput(`${toValue(matches[next])} `);
+      } else {
+        tabCycleRef.current = { key: cycleKey, index: -1 };
+        push("output", matches.join("   "));
+        const common = commonPrefix(matches);
+        if (common.length > ctx.prefix.length) {
+          setInput(toValue(common));
+        }
+      }
     }
   };
 
@@ -476,7 +546,10 @@ function Terminal({ theme, setTheme }) {
           autoCorrect="off"
           spellCheck="false"
           value={input}
-          onChange={(e) => setInput(e.target.value)}
+          onChange={(e) => {
+            tabCycleRef.current = null;
+            setInput(e.target.value);
+          }}
           onKeyDown={onKeyDown}
           placeholder="type `help`..."
         />
